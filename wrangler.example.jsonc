@@ -13,6 +13,7 @@
     "EDGEGIST_OWNER_TOKEN": "change-this-token",
     "EDGEGIST_BASE_URL": "https://edge-gist.your-subdomain.workers.dev",
     "EDGEGIST_HISTORY_MAX_VERSIONS": "100",
+    "EDGEGIST_STORAGE_THRESHOLD_KB": "100",
     "EDGEGIST_TURNSTILE_SITE_KEY": "",
     "EDGEGIST_TURNSTILE_SECRET_KEY": ""
   },
@@ -21,6 +22,12 @@
       "binding": "DB",
       "database_name": "edge-gist",
       "database_id": "replace-with-cloudflare-d1-database-id"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "R2_BUCKET",
+      "bucket_name": "edgegist-files"
     }
   ]
 }

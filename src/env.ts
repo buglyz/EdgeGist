@@ -16,8 +16,84 @@ export type D1DatabaseLike = {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>
 }
 
+export type R2Bucket = {
+  get(key: string): Promise<R2Object | null>
+  put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null, options?: R2PutOptions): Promise<R2Object>
+  delete(key: string | string[]): Promise<void>
+  head(key: string): Promise<R2Object | null>
+  list(options?: R2ListOptions): Promise<R2Objects>
+}
+
+export type R2Object = {
+  key: string
+  version: string
+  size: number
+  etag: string
+  httpEtag: string
+  uploaded: Date
+  httpMetadata?: R2HTTPMetadata
+  customMetadata?: Record<string, string>
+  range?: R2Range
+  checksums: R2Checksums
+  body?: ReadableStream
+  bodyUsed: boolean
+  arrayBuffer(): Promise<ArrayBuffer>
+  text(): Promise<string>
+  json<T>(): Promise<T>
+  blob(): Promise<Blob>
+}
+
+export type R2PutOptions = {
+  httpMetadata?: R2HTTPMetadata
+  customMetadata?: Record<string, string>
+  md5?: ArrayBuffer | string
+  sha1?: ArrayBuffer | string
+  sha256?: ArrayBuffer | string
+  sha384?: ArrayBuffer | string
+  sha512?: ArrayBuffer | string
+}
+
+export type R2HTTPMetadata = {
+  contentType?: string
+  contentLanguage?: string
+  contentDisposition?: string
+  contentEncoding?: string
+  cacheControl?: string
+  cacheExpiry?: Date
+}
+
+export type R2ListOptions = {
+  limit?: number
+  prefix?: string
+  cursor?: string
+  delimiter?: string
+  startAfter?: string
+  include?: ('httpMetadata' | 'customMetadata')[]
+}
+
+export type R2Objects = {
+  objects: R2Object[]
+  truncated: boolean
+  cursor?: string
+  delimitedPrefixes: string[]
+}
+
+export type R2Range = {
+  offset: number
+  length: number
+}
+
+export type R2Checksums = {
+  md5?: ArrayBuffer
+  sha1?: ArrayBuffer
+  sha256?: ArrayBuffer
+  sha384?: ArrayBuffer
+  sha512?: ArrayBuffer
+}
+
 export type EdgeGistBindings = {
   DB: D1DatabaseLike
+  R2_BUCKET?: R2Bucket
   EDGEGIST_OWNER_USERNAME?: string
   EDGEGIST_OWNER_PASSWORD?: string
   EDGEGIST_OWNER_TOKEN?: string
@@ -25,6 +101,7 @@ export type EdgeGistBindings = {
   EDGEGIST_HISTORY_MAX_VERSIONS?: string
   EDGEGIST_TURNSTILE_SITE_KEY?: string
   EDGEGIST_TURNSTILE_SECRET_KEY?: string
+  EDGEGIST_STORAGE_THRESHOLD_KB?: string
 }
 
 export type RetentionPolicy = {
@@ -38,6 +115,7 @@ export type EdgeGistConfig = {
   baseUrl: string
   retention: RetentionPolicy
   turnstile: TurnstileConfig | null
+  storageThresholdBytes: number
 }
 
 export type TurnstileConfig = {
@@ -68,6 +146,7 @@ export function getConfig(env: EdgeGistBindings, requestUrl?: string): EdgeGistC
     baseUrl: normalizeBaseUrl(env.EDGEGIST_BASE_URL, requestUrl),
     retention: parseRetentionPolicy(env),
     turnstile: parseTurnstileConfig(env, requestUrl),
+    storageThresholdBytes: parseStorageThreshold(env),
   }
 }
 
@@ -104,6 +183,11 @@ function normalizeBaseUrl(configuredBaseUrl?: string, requestUrl?: string): stri
 export function parseRetentionPolicy(env: EdgeGistBindings): RetentionPolicy {
   const latest = parseNonNegativeInteger(env.EDGEGIST_HISTORY_MAX_VERSIONS)
   return { count: latest ?? 100 }
+}
+
+function parseStorageThreshold(env: EdgeGistBindings): number {
+  const kb = parseNonNegativeInteger(env.EDGEGIST_STORAGE_THRESHOLD_KB)
+  return (kb ?? 100) * 1024
 }
 
 function parseNonNegativeInteger(value?: string): number | null {

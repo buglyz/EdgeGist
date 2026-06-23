@@ -1,4 +1,5 @@
 import type { D1DatabaseLike, D1PreparedStatement } from '../env'
+import type { StorageManager } from '../storage/storage-manager'
 import type {
   ChangeStatus,
   CreateGistInput,
@@ -33,6 +34,9 @@ type GistFileRow = {
   truncated: number
   created_at: string
   updated_at: string
+  storage_type: string
+  r2_key: string | null
+  r2_etag: string | null
 }
 
 type VersionRow = {
@@ -54,6 +58,9 @@ type VersionFileRow = {
   language: string | null
   size: number
   truncated: number
+  storage_type: string
+  r2_key: string | null
+  r2_etag: string | null
 }
 
 type VersionFileWithVersionIdRow = VersionFileRow & {
@@ -79,20 +86,26 @@ type VersionIdRow = {
 const maxD1BoundParameters = 100
 
 export class D1GistRepository implements GistRepository {
-  constructor(private readonly db: D1DatabaseLike) {}
+  constructor(
+    private readonly db: D1DatabaseLike,
+    private readonly storageManager: StorageManager,
+  ) {}
 
   async createGist(input: CreateGistInput): Promise<GistRecord> {
+    const gistId = createId(20)
+    const files = await Promise.all(
+      input.files.map((file) => this.normalizeFile(gistId, file.filename, file.content, input.now, file)),
+    )
+
     const gist: GistRecord = {
-      id: createId(20),
+      id: gistId,
       ownerLogin: input.ownerLogin,
       description: input.description,
       visibility: input.visibility,
       starredAt: null,
       createdAt: input.now,
       updatedAt: input.now,
-      files: orderFilesByCreatedAt(
-        input.files.map((file) => normalizeFile(file.filename, file.content, input.now, file)),
-      ),
+      files: orderFilesByCreatedAt(files),
     }
 
     await this.db.batch([
@@ -165,7 +178,16 @@ export class D1GistRepository implements GistRepository {
     const existing = existingGist ?? await this.getGist(id)
     if (!existing) return null
 
-    const nextFiles = applyFileUpdates(existing.files, input.files ?? [], input.now)
+    const oldFilesWithR2 = await this.db
+      .prepare(
+        `SELECT storage_type, r2_key
+         FROM gist_files
+         WHERE gist_id = ? AND storage_type = 'r2'`,
+      )
+      .bind(id)
+      .all<{ storage_type: string; r2_key: string | null }>()
+
+    const nextFiles = await this.applyFileUpdatesAsync(existing.files, input.files ?? [], input.now, id)
     const description = input.description ?? existing.description
     const visibility = input.visibility ?? existing.visibility
 
@@ -181,6 +203,13 @@ export class D1GistRepository implements GistRepository {
       ...this.insertFileStatements(id, nextFiles),
     ])
 
+    const newR2Keys = new Set(nextFiles.map((f) => (f as any).r2Key).filter(Boolean))
+    for (const file of oldFilesWithR2.results ?? []) {
+      if (file.r2_key && !newR2Keys.has(file.r2_key)) {
+        await this.storageManager.delete(file.storage_type as 'r2', file.r2_key)
+      }
+    }
+
     return {
       ...existing,
       description,
@@ -191,9 +220,34 @@ export class D1GistRepository implements GistRepository {
   }
 
   async deleteGist(id: string): Promise<boolean> {
-    const existing = await this.getGist(id)
+    const existing = await this.getGist(id, false)
     if (!existing) return false
+
+    const filesWithR2 = await this.db
+      .prepare(
+        `SELECT storage_type, r2_key
+         FROM gist_files
+         WHERE gist_id = ? AND storage_type = 'r2'`,
+      )
+      .bind(id)
+      .all<{ storage_type: string; r2_key: string | null }>()
+
+    const versionFilesWithR2 = await this.db
+      .prepare(
+        `SELECT DISTINCT gist_version_files.storage_type, gist_version_files.r2_key
+         FROM gist_version_files
+         INNER JOIN gist_versions ON gist_versions.id = gist_version_files.version_id
+         WHERE gist_versions.gist_id = ? AND gist_version_files.storage_type = 'r2'`,
+      )
+      .bind(id)
+      .all<{ storage_type: string; r2_key: string | null }>()
+
     await this.db.prepare('DELETE FROM gists WHERE id = ?').bind(id).run()
+
+    for (const file of [...(filesWithR2.results ?? []), ...(versionFilesWithR2.results ?? [])]) {
+      await this.storageManager.delete(file.storage_type as 'r2', file.r2_key)
+    }
+
     return true
   }
 
@@ -280,7 +334,7 @@ export class D1GistRepository implements GistRepository {
     const [files, changes] = await Promise.all([
       this.db
         .prepare(
-          `SELECT gist_version_files.version_id, filename, ${contentSelection}, type, language, size, truncated
+          `SELECT gist_version_files.version_id, filename, ${contentSelection}, type, language, size, truncated, storage_type, r2_key, r2_etag
            FROM gist_version_files
            INNER JOIN gist_versions ON gist_versions.id = gist_version_files.version_id
            WHERE gist_versions.gist_id = ?
@@ -294,11 +348,24 @@ export class D1GistRepository implements GistRepository {
     const filesByVersionId = groupRowsByVersionId(files.results ?? [])
     const changesByVersionId = groupRowsByVersionId(changes)
 
-    return versions.map((row) => ({
-      ...versionBaseFromRow(row),
-      files: (filesByVersionId.get(row.id) ?? []).map((file) => versionFileFromRow(file, row.committed_at)),
-      changes: (changesByVersionId.get(row.id) ?? []).map(versionFileChangeFromRow),
-    }))
+    return Promise.all(
+      versions.map(async (row) => {
+        const versionFiles = filesByVersionId.get(row.id) ?? []
+        const hydratedFiles = await Promise.all(
+          versionFiles.map(async (file) => {
+            const content = includeContent
+              ? await this.storageManager.retrieve(file.storage_type as 'inline' | 'r2', file.content, file.r2_key)
+              : ''
+            return versionFileFromRow({ ...file, content }, row.committed_at)
+          }),
+        )
+        return {
+          ...versionBaseFromRow(row),
+          files: hydratedFiles,
+          changes: (changesByVersionId.get(row.id) ?? []).map(versionFileChangeFromRow),
+        }
+      }),
+    )
   }
 
   async listVersionCommits(gistId: string): Promise<GistVersionCommitRecord[]> {
@@ -392,8 +459,8 @@ export class D1GistRepository implements GistRepository {
   }
 
   private insertFileStatements(gistId: string, files: GistFileRecord[]): D1PreparedStatement[] {
-    return chunkByBoundParameterLimit(files, 9).map((chunk) => {
-      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
+    return chunkByBoundParameterLimit(files, 12).map((chunk) => {
+      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
       const values = chunk.flatMap((file) => [
         gistId,
         file.filename,
@@ -404,11 +471,14 @@ export class D1GistRepository implements GistRepository {
         file.truncated ? 1 : 0,
         file.createdAt,
         file.updatedAt,
+        (file as any).storageType ?? 'inline',
+        (file as any).r2Key ?? null,
+        (file as any).r2Etag ?? null,
       ])
       return this.db
         .prepare(
           `INSERT INTO gist_files (
-             gist_id, filename, content, type, language, size, truncated, created_at, updated_at
+             gist_id, filename, content, type, language, size, truncated, created_at, updated_at, storage_type, r2_key, r2_etag
            )
            VALUES ${placeholders}`,
         )
@@ -417,8 +487,8 @@ export class D1GistRepository implements GistRepository {
   }
 
   private insertVersionFileStatements(versionId: string, files: GistFileRecord[]): D1PreparedStatement[] {
-    return chunkByBoundParameterLimit(files, 7).map((chunk) => {
-      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')
+    return chunkByBoundParameterLimit(files, 10).map((chunk) => {
+      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
       const values = chunk.flatMap((file) => [
         versionId,
         file.filename,
@@ -427,11 +497,14 @@ export class D1GistRepository implements GistRepository {
         file.language,
         file.size,
         file.truncated ? 1 : 0,
+        (file as any).storageType ?? 'inline',
+        (file as any).r2Key ?? null,
+        (file as any).r2Etag ?? null,
       ])
       return this.db
         .prepare(
           `INSERT INTO gist_version_files (
-             version_id, filename, content, type, language, size, truncated
+             version_id, filename, content, type, language, size, truncated, storage_type, r2_key, r2_etag
            )
            VALUES ${placeholders}`,
         )
@@ -468,13 +541,17 @@ export class D1GistRepository implements GistRepository {
     const contentSelection = includeContent ? 'content' : "'' AS content"
     const files = await this.db
       .prepare(
-        `SELECT filename, ${contentSelection}, type, language, size, truncated, created_at, updated_at
+        `SELECT filename, ${contentSelection}, type, language, size, truncated, created_at, updated_at, storage_type, r2_key, r2_etag
          FROM gist_files
          WHERE gist_id = ?
          ORDER BY created_at DESC, filename ASC`,
       )
       .bind(row.id)
       .all<GistFileRow>()
+
+    const hydratedFiles = await Promise.all(
+      (files.results ?? []).map((fileRow) => this.fileFromRow(fileRow, includeContent)),
+    )
 
     return {
       id: row.id,
@@ -484,7 +561,7 @@ export class D1GistRepository implements GistRepository {
       starredAt: row.starred_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      files: (files.results ?? []).map(fileFromRow),
+      files: hydratedFiles,
     }
   }
 
@@ -496,7 +573,7 @@ export class D1GistRepository implements GistRepository {
     const contentSelection = includeContent ? 'content' : "'' AS content"
     const files = await this.db
       .prepare(
-        `SELECT filename, ${contentSelection}, type, language, size, truncated
+        `SELECT filename, ${contentSelection}, type, language, size, truncated, storage_type, r2_key, r2_etag
          FROM gist_version_files
          WHERE version_id = ?
          ORDER BY filename ASC`,
@@ -516,6 +593,24 @@ export class D1GistRepository implements GistRepository {
         .all<VersionFileChangeRow>()
       : { results: [] }
 
+    const hydratedFiles = await Promise.all(
+      (files.results ?? []).map(async (file) => {
+        const content = includeContent
+          ? await this.storageManager.retrieve(file.storage_type as 'inline' | 'r2', file.content, file.r2_key)
+          : ''
+        return {
+          filename: file.filename,
+          content,
+          type: file.type,
+          language: file.language,
+          size: file.size,
+          truncated: file.truncated === 1,
+          createdAt: row.committed_at,
+          updatedAt: row.committed_at,
+        }
+      }),
+    )
+
     return {
       id: row.id,
       gistId: row.gist_id,
@@ -528,18 +623,96 @@ export class D1GistRepository implements GistRepository {
         additions: row.change_status_additions,
         deletions: row.change_status_deletions,
       },
-      files: (files.results ?? []).map((file) => ({
-        filename: file.filename,
-        content: file.content,
-        type: file.type,
-        language: file.language,
-        size: file.size,
-        truncated: file.truncated === 1,
-        createdAt: row.committed_at,
-        updatedAt: row.committed_at,
-      })),
+      files: hydratedFiles,
       changes: (changes.results ?? []).map(versionFileChangeFromRow),
     }
+  }
+
+  private async normalizeFile(
+    gistId: string,
+    filename: string,
+    content: string,
+    now: string,
+    metadata: { type?: string | null; language?: string | null },
+  ): Promise<GistFileRecord & { storageType: string; r2Key: string | null; r2Etag: string | null }> {
+    const stored = await this.storageManager.store(gistId, filename, content)
+
+    return {
+      filename,
+      content: stored.content,
+      type: metadata.type ?? inferMimeType(filename),
+      language: metadata.language ?? inferLanguage(filename),
+      size: stored.size,
+      truncated: false,
+      createdAt: now,
+      updatedAt: now,
+      storageType: stored.storageType,
+      r2Key: stored.r2Key,
+      r2Etag: stored.r2Etag,
+    }
+  }
+
+  private async fileFromRow(row: GistFileRow, includeContent: boolean): Promise<GistFileRecord> {
+    const content = includeContent
+      ? await this.storageManager.retrieve(row.storage_type as 'inline' | 'r2', row.content, row.r2_key)
+      : ''
+
+    return {
+      filename: row.filename,
+      content,
+      type: row.type,
+      language: row.language,
+      size: row.size,
+      truncated: row.truncated === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+  }
+
+  private async applyFileUpdatesAsync(
+    currentFiles: GistFileRecord[],
+    updates: UpdateGistInput['files'],
+    now: string,
+    gistId: string,
+  ): Promise<GistFileRecord[]> {
+    const currentFileByName = new Map(currentFiles.map((file) => [file.filename, file]))
+    const deletedOriginalFilenames = new Set<string>()
+    const replacementsByOriginalFilename = new Map<string, GistFileRecord>()
+    const newFiles: GistFileRecord[] = []
+
+    for (const update of updates ?? []) {
+      const existing = currentFileByName.get(update.previousFilename)
+      if (update.delete) {
+        deletedOriginalFilenames.add(update.previousFilename)
+        continue
+      }
+
+      if (!existing && update.content === undefined) continue
+      const filename = update.filename
+      const content = update.content ?? existing?.content ?? ''
+      const next = await this.normalizeFile(gistId, filename, content, now, {
+        type: update.type ?? existing?.type ?? undefined,
+        language: update.language ?? existing?.language ?? undefined,
+      })
+
+      const file = {
+        ...next,
+        createdAt: existing?.createdAt ?? now,
+      }
+
+      if (existing) {
+        replacementsByOriginalFilename.set(update.previousFilename, file)
+      } else {
+        newFiles.push(file)
+      }
+    }
+
+    const existingFiles = currentFiles.flatMap((file) => {
+      if (deletedOriginalFilenames.has(file.filename)) return []
+      return [replacementsByOriginalFilename.get(file.filename) ?? file]
+    })
+
+    return orderFilesByCreatedAt([...newFiles, ...existingFiles])
   }
 }
 
@@ -621,37 +794,6 @@ function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
 
-function normalizeFile(
-  filename: string,
-  content: string,
-  now: string,
-  metadata: { type?: string | null; language?: string | null },
-): GistFileRecord {
-  return {
-    filename,
-    content,
-    type: metadata.type ?? inferMimeType(filename),
-    language: metadata.language ?? inferLanguage(filename),
-    size: new TextEncoder().encode(content).length,
-    truncated: false,
-    createdAt: now,
-    updatedAt: now,
-  }
-}
-
-function fileFromRow(row: GistFileRow): GistFileRecord {
-  return {
-    filename: row.filename,
-    content: row.content,
-    type: row.type,
-    language: row.language,
-    size: row.size,
-    truncated: row.truncated === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }
-}
-
 function versionBaseFromRow(row: VersionRow): Omit<GistVersionRecord, 'files' | 'changes'> {
   return {
     id: row.id,
@@ -702,51 +844,6 @@ function groupRowsByVersionId<T extends { version_id: string }>(rows: T[]): Map<
     }
   }
   return groups
-}
-
-function applyFileUpdates(
-  currentFiles: GistFileRecord[],
-  updates: UpdateGistInput['files'],
-  now: string,
-): GistFileRecord[] {
-  const currentFileByName = new Map(currentFiles.map((file) => [file.filename, file]))
-  const deletedOriginalFilenames = new Set<string>()
-  const replacementsByOriginalFilename = new Map<string, GistFileRecord>()
-  const newFiles: GistFileRecord[] = []
-
-  for (const update of updates ?? []) {
-    const existing = currentFileByName.get(update.previousFilename)
-    if (update.delete) {
-      deletedOriginalFilenames.add(update.previousFilename)
-      continue
-    }
-
-    if (!existing && update.content === undefined) continue
-    const filename = update.filename
-    const content = update.content ?? existing?.content ?? ''
-    const next = normalizeFile(filename, content, now, {
-      type: update.type ?? existing?.type ?? undefined,
-      language: update.language ?? existing?.language ?? undefined,
-    })
-
-    const file = {
-      ...next,
-      createdAt: existing?.createdAt ?? now,
-    }
-
-    if (existing) {
-      replacementsByOriginalFilename.set(update.previousFilename, file)
-    } else {
-      newFiles.push(file)
-    }
-  }
-
-  const existingFiles = currentFiles.flatMap((file) => {
-    if (deletedOriginalFilenames.has(file.filename)) return []
-    return [replacementsByOriginalFilename.get(file.filename) ?? file]
-  })
-
-  return orderFilesByCreatedAt([...newFiles, ...existingFiles])
 }
 
 function orderFilesByCreatedAt(files: GistFileRecord[]): GistFileRecord[] {

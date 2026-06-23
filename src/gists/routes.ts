@@ -20,6 +20,8 @@ import {
   presentVersion,
 } from './presenter'
 import type { ListGistsOptions } from './types'
+import { DocxConverter } from '../docx/docx-converter'
+import { StorageManager } from '../storage/storage-manager'
 
 const rawFileHeaders = {
   'content-type': 'text/plain; charset=utf-8',
@@ -198,6 +200,75 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
     return c.body(file.content, 200, rawFileHeaders)
   })
 
+  app.get(route('/gists/:gistId/files/:filename/preview'), async (c) => {
+    const gist = await requireReadableGist(c, false)
+    const filename = requiredParam(c, 'filename')
+
+    if (!filename.toLowerCase().endsWith('.docx')) {
+      throw badRequest('Preview only available for .docx files')
+    }
+
+    try {
+      const r2 = c.env.R2_BUCKET
+      if (!r2) {
+        throw new Error('R2 bucket not configured')
+      }
+
+      const storageManager = new StorageManager(r2, c.get('config').storageThresholdBytes)
+      const repository = getRepository(c)
+      const fullGist = await repository.getGist(gist.id, true)
+      if (!fullGist) throw notFound()
+
+      const file = fullGist.files.find((candidate) => candidate.filename === filename)
+      if (!file) throw notFound()
+
+      const docxBuffer = new TextEncoder().encode(file.content).buffer
+      const converter = new DocxConverter()
+      const html = await converter.convertToHtml(docxBuffer)
+
+      return c.html(html)
+    } catch (error) {
+      console.error('DOCX preview error:', error)
+      const converter = new DocxConverter()
+      return c.html(converter['generateErrorHtml'](error))
+    }
+  })
+
+  app.get(route('/:owner/:gistId/files/:filename/preview'), async (c) => {
+    requireOwnerPath(c)
+    const gist = await requireReadableGist(c, false)
+    const filename = requiredParam(c, 'filename')
+
+    if (!filename.toLowerCase().endsWith('.docx')) {
+      throw badRequest('Preview only available for .docx files')
+    }
+
+    try {
+      const r2 = c.env.R2_BUCKET
+      if (!r2) {
+        throw new Error('R2 bucket not configured')
+      }
+
+      const storageManager = new StorageManager(r2, c.get('config').storageThresholdBytes)
+      const repository = getRepository(c)
+      const fullGist = await repository.getGist(gist.id, true)
+      if (!fullGist) throw notFound()
+
+      const file = fullGist.files.find((candidate) => candidate.filename === filename)
+      if (!file) throw notFound()
+
+      const docxBuffer = new TextEncoder().encode(file.content).buffer
+      const converter = new DocxConverter()
+      const html = await converter.convertToHtml(docxBuffer)
+
+      return c.html(html)
+    } catch (error) {
+      console.error('DOCX preview error:', error)
+      const converter = new DocxConverter()
+      return c.html(converter['generateErrorHtml'](error))
+    }
+  })
+
   app.get(route('/gists/:gistId/star'), async (c) => {
     requireOwner(c)
     const gist = await requireExistingGist(c, !routeOptions.lite)
@@ -331,7 +402,8 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
 type AppContext = Context<AppEnv>
 
 function getRepository(c: AppContext) {
-  return new D1GistRepository(c.env.DB)
+  const storageManager = new StorageManager(c.env.R2_BUCKET, c.get('config').storageThresholdBytes)
+  return new D1GistRepository(c.env.DB, storageManager)
 }
 
 function listOptionsFromSearchParams(
