@@ -31,16 +31,20 @@ jobs:
           sed -i "s|https://edge-gist.your-subdomain.workers.dev|${{ secrets.BASE_URL }}|g" wrangler.jsonc
           sed -i "s/\"replace-with-cloudflare-d1-database-id\"/\"${{ secrets.D1_DATABASE_ID }}\"/g" wrangler.jsonc
 
-          # Add R2 binding if R2_BUCKET_NAME secret is set
+          # Handle R2 binding based on secret
           if [ -n "${{ secrets.R2_BUCKET_NAME }}" ]; then
-            echo "Adding R2 bucket binding..."
-            # Remove the placeholder comment line
-            sed -i '/\/\/ "r2_buckets":/d' wrangler.jsonc
-            # Add R2 configuration before the closing brace
-            sed -i '/"d1_databases":/,/\]/a\  ,\n  "r2_buckets": [\n    {\n      "binding": "R2_BUCKET",\n      "bucket_name": "${{ secrets.R2_BUCKET_NAME }}"\n    }\n  ]' wrangler.jsonc
+            echo "✅ R2_BUCKET_NAME is set, updating bucket name..."
+            sed -i "s/\"edgegist-files\"/\"${{ secrets.R2_BUCKET_NAME }}\"/g" wrangler.jsonc
           else
-            echo "R2_BUCKET_NAME not set, skipping R2 binding"
+            echo "⚠️  R2_BUCKET_NAME not set, removing R2 binding..."
+            # Remove the entire r2_buckets section
+            sed -i '/"r2_buckets":/,/\]/d' wrangler.jsonc
+            # Remove trailing comma if it exists
+            sed -i 's/,\s*$//' wrangler.jsonc
           fi
+
+          echo "Generated wrangler.jsonc:"
+          cat wrangler.jsonc
       - name: Build
         run: bun run build
       - name: Apply D1 migrations
