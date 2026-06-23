@@ -69,6 +69,8 @@ The Web UI supports English and Simplified Chinese. The screenshots below use Si
 - GitHub Gist-shaped API for core gist CRUD and retained revisions.
 - Single-owner authentication: bearer token for API clients, password + optional Turnstile + signed cookie for the Web UI.
 - Public and secret-link visibility handling. Secret gists are hidden from anonymous list APIs but remain readable by direct URL; retained revisions follow the current gist visibility.
+- **Cloudflare R2 object storage**: Hybrid storage strategy that automatically stores large files (>100KB configurable) and binary files in R2 while keeping small text files in D1.
+- **DOCX document preview**: Server-side conversion of DOCX files to formatted HTML with XSS protection and beautiful styling.
 - D1-backed current files, retained history snapshots, and settings.
 - Latest-N history retention for each file and each gist's file-change feed.
 - GitHub Gist-style Web UI at `/<owner>`, `/<owner>/new`, `/<owner>/<gist_id>`, and `/<owner>/<gist_id>/<sha>` with anonymous public browsing, owner management, gist editing, file history, diff view, stars, import/export, i18n, themes, PWA install support, and Cloudflare usage/quota views.
@@ -143,6 +145,7 @@ The build copies `.assetsignore` into `dist` so `_worker.js` is not served as a 
 | `EDGEGIST_OWNER_TOKEN` | Yes | Owner access token for API/client operations. Keep it secret. |
 | `EDGEGIST_BASE_URL` | Yes | Public origin with protocol, for example `https://edge-gist.sbfm.eu.org`. Use the final Workers custom domain, not a Pages URL. |
 | `EDGEGIST_HISTORY_MAX_VERSIONS` | Optional | Number of retained history entries per file and file-change records per gist. Defaults to `100`. |
+| `EDGEGIST_STORAGE_THRESHOLD_KB` | Optional | Storage threshold in KB. Files larger than this (or binary files) are stored in R2. Defaults to `100`. Set to a higher value to keep more files in D1. |
 | `EDGEGIST_TURNSTILE_SITE_KEY` | Optional | Cloudflare Turnstile site key. Leave blank to disable Turnstile. |
 | `EDGEGIST_TURNSTILE_SECRET_KEY` | Optional | Cloudflare Turnstile secret key. Required only when the site key is set. |
 
@@ -157,6 +160,24 @@ Local development can use `.dev.vars`. Production reads values from `wrangler.js
 | `database_id` | Yes | D1 database UUID from `wrangler d1 create` or the Cloudflare dashboard. This is an ID, not the database name. |
 
 Use the same D1 database UUID in the app's Cloudflare Usage settings when you want D1 usage and quota data.
+
+### R2 binding in `r2_buckets` (Optional but Recommended)
+
+| Field | Required | Value |
+| --- | --- | --- |
+| `binding` | Yes | Must be `R2_BUCKET`. The backend reads the R2 bucket from `c.env.R2_BUCKET`. |
+| `bucket_name` | Yes | R2 bucket name, for example `edgegist-files`. Create with `wrangler r2 bucket create edgegist-files`. |
+
+R2 is optional but highly recommended for deployments that handle large files. Without R2:
+- Files larger than the storage threshold will be rejected
+- Binary files (DOCX, PDF, images, etc.) cannot be stored
+- All files are stored in D1, consuming the 500MB (Free) or 10GB (Paid) database limit
+
+With R2 configured:
+- Large files (>100KB by default) are stored in R2
+- Binary files are automatically stored in R2
+- D1 only stores small text files, extending database lifetime
+- Automatic cleanup of R2 objects when gists are deleted
 
 ### Custom domain
 
@@ -176,7 +197,6 @@ A custom domain can be attached in either place:
 
 Cloudflare requires the hostname to be in a Cloudflare zone you control. If Wrangler fails to create the custom domain because of DNS or token permissions, deploy the Worker first, then attach the domain manually in the dashboard.
 
-No KV, R2, Queues, or Workers Sites configuration is required for this project.
 ## Command-Line Deployment
 
 This project deploys to Cloudflare Workers with Workers Assets. Use `wrangler deploy`; do not use `wrangler pages deploy`.
@@ -197,36 +217,46 @@ bun install
 bun run db:create
 ```
 
-3. Create the production Wrangler config:
+3. (Optional but Recommended) Create an R2 bucket for large file storage:
+
+```bash
+wrangler r2 bucket create edgegist-files
+```
+
+This enables hybrid storage for large files and binary documents. Skip this step if you only plan to store small text files.
+
+4. Create the production Wrangler config:
 
 ```bash
 cp wrangler.example.jsonc wrangler.jsonc
 ```
 
-4. Edit `wrangler.jsonc`:
+5. Edit `wrangler.jsonc`:
 
 | Area | What to set |
 | --- | --- |
 | Worker | `name`, normally `edge-gist`. |
 | Owner auth | `EDGEGIST_OWNER_USERNAME`, `EDGEGIST_OWNER_PASSWORD`, and `EDGEGIST_OWNER_TOKEN`. |
 | Public URL | `EDGEGIST_BASE_URL`, for example `https://edge-gist.sbfm.eu.org`. |
+| Storage threshold | Optional `EDGEGIST_STORAGE_THRESHOLD_KB` (defaults to `100`). Files larger than this are stored in R2. |
 | D1 | `d1_databases[0].database_id` with the D1 UUID. Keep `binding` as `DB`. |
+| R2 (optional) | `r2_buckets[0].bucket_name` with your R2 bucket name (e.g., `edgegist-files`). Keep `binding` as `R2_BUCKET`. Omit this section if you skipped R2 creation. |
 | Custom domain | Optional `routes` entry with `{ "pattern": "your-domain.example.com", "custom_domain": true }`. |
 | Turnstile | Optional site key and secret key. Set both or leave both blank. |
 
-5. Apply database migrations to the remote D1 database:
+6. Apply database migrations to the remote D1 database:
 
 ```bash
 bun run db:migrate:remote
 ```
 
-6. Build the Worker and static assets:
+7. Build the Worker and static assets:
 
 ```bash
 bun run build
 ```
 
-7. Deploy:
+8. Deploy:
 
 ```bash
 bun run deploy
@@ -238,7 +268,7 @@ If you are not logged in with Wrangler, provide a token for this command only:
 CLOUDFLARE_API_TOKEN=<token> bun run deploy
 ```
 
-8. If you did not configure `routes`, attach the custom domain manually in the Cloudflare dashboard. After the domain is active, make sure `EDGEGIST_BASE_URL` matches that URL and redeploy if you changed it.
+9. If you did not configure `routes`, attach the custom domain manually in the Cloudflare dashboard. After the domain is active, make sure `EDGEGIST_BASE_URL` matches that URL and redeploy if you changed it.
 
 ### Manual Cloudflare Workers deployment from a release package
 
@@ -363,14 +393,14 @@ Limits below were checked against Cloudflare's official docs on 2026-05-11. Clou
 
 ### Practical EdgeGist limits
 
-- Keep each file below 2 MB. The app enforces `2,000,000` bytes per file content because D1 caps strings and rows at that size.
+- Keep each file below 2 MB when using D1-only storage. The app enforces `2,000,000` bytes per file content because D1 caps strings and rows at that size. With R2 configured, larger files are automatically stored in R2.
 - Keep search terms short. D1 caps `LIKE` patterns at 50 bytes, and EdgeGist wraps the search query in `%...%`.
-- Keep the retained history count intentional. Every retained version stores file snapshots in D1, so storage grows with `file size * retained versions`, plus current files and change metadata. Set `EDGEGIST_HISTORY_MAX_VERSIONS=0` only when you intentionally want new writes to skip EdgeGist history recording.
-- On Workers Free, treat EdgeGist as a personal deployment: 100,000 dynamic Worker requests/day, 10 ms CPU/request, 50 subrequests/request, 500 MB maximum D1 database size, 5 million rows read/day, and 100,000 rows written/day.
+- Keep the retained history count intentional. Every retained version stores file snapshots in D1 (or R2 for large files), so storage grows with `file size * retained versions`, plus current files and change metadata. Set `EDGEGIST_HISTORY_MAX_VERSIONS=0` only when you intentionally want new writes to skip EdgeGist history recording.
+- On Workers Free, treat EdgeGist as a personal deployment: 100,000 dynamic Worker requests/day, 10 ms CPU/request, 50 subrequests/request, 500 MB maximum D1 database size (extended with R2), 5 million rows read/day, and 100,000 rows written/day.
 - On Workers Paid, the important ceilings become cost and per-database scale: 10 million Worker requests/month included, 30 million CPU milliseconds/month included, 10 GB maximum D1 database size, 25 billion rows read/month included, and 50 million rows written/month included.
 - On D1 Free, exceeding daily read/write limits stops D1 queries until the daily reset; hitting the storage limit requires deleting data or upgrading before new writes/schema changes can continue. On D1 Paid, usage above included reads, writes, or storage is billed.
 - Static assets are not the same as dynamic app/API routes. `/static/*`, `/icons/*`, and `/screenshots/*` are served as assets, but the API and owner pages invoke the Worker and count toward Worker limits.
-- EdgeGist stores data only in D1. It does not use R2/KV for large object storage, so it is not a good fit for binary blobs, huge archives, or Git-style repository transport.
+- EdgeGist stores text data in D1 and large/binary files in R2 (when configured). The hybrid storage strategy extends D1 database lifetime and enables support for large documents and binary files.
 
 ## Updating
 
