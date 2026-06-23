@@ -203,6 +203,36 @@ bun run dev
 
 访问 `http://127.0.0.1:8787/<owner-username>`
 
+## 🤖 GitHub Actions 自动部署
+
+### 配置 GitHub Secrets
+
+在你的 GitHub 仓库中配置以下 Secrets：
+
+**Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret 名称 | 必填 | 说明 |
+|------------|------|------|
+| `CLOUDFLARE_API_TOKEN` | ✅ | Cloudflare API Token（需要 Workers、D1、R2 权限） |
+| `OWNER_USERNAME` | ✅ | 管理员用户名 |
+| `OWNER_PASSWORD` | ✅ | 管理员密码 |
+| `OWNER_TOKEN` | ✅ | API 访问令牌 |
+| `BASE_URL` | ✅ | Worker 访问地址 |
+| `D1_DATABASE_ID` | ✅ | D1 数据库 UUID（`wrangler d1 list` 获取） |
+| `R2_BUCKET_NAME` | ⚠️ | R2 存储桶名称（强烈推荐） |
+
+**完整配置指南**: [.github/DEPLOYMENT_GUIDE.md](.github/DEPLOYMENT_GUIDE.md)
+
+### 触发部署
+
+推送到 main 分支即可自动部署：
+
+```bash
+git push origin main
+```
+
+或在 GitHub Actions 页面手动触发部署。
+
 ## 📚 使用文档
 
 ### API 使用
