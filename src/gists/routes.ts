@@ -24,6 +24,7 @@ import { DocxConverter } from '../docx/docx-converter'
 import { StorageManager } from '../storage/storage-manager'
 
 const MAX_PREVIEW_SIZE_BYTES = 10 * 1024 * 1024 // 10MB
+const PREVIEW_CACHE_VERSION = 'v1'
 
 const rawFileHeaders = {
   'content-type': 'text/plain; charset=utf-8',
@@ -228,9 +229,36 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
         throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
       }
 
+      // Try cache first
+      const cacheKey = `previews/${PREVIEW_CACHE_VERSION}/${gist.id}/${filename}/${file.r2Etag || 'inline'}.html`
+      try {
+        const cached = await r2.get(cacheKey)
+        if (cached) {
+          console.log('DOCX preview cache hit', { gistId: gist.id, filename })
+          return c.html(await cached.text())
+        }
+      } catch (cacheError) {
+        console.warn('Cache read failed, will regenerate', { cacheKey, error: cacheError })
+      }
+
+      // Convert DOCX to HTML
       const docxBuffer = new TextEncoder().encode(file.content).buffer
       const converter = new DocxConverter()
       const html = await converter.convertToHtml(docxBuffer)
+
+      // Store in cache asynchronously (non-blocking)
+      c.executionCtx.waitUntil(
+        r2.put(cacheKey, html, {
+          httpMetadata: { contentType: 'text/html; charset=utf-8' },
+          customMetadata: {
+            gistId: gist.id,
+            filename,
+            generatedAt: new Date().toISOString(),
+          },
+        }).catch(error => {
+          console.error('Failed to cache preview', { cacheKey, error })
+        })
+      )
 
       return c.html(html)
     } catch (error) {
@@ -273,9 +301,36 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
         throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
       }
 
+      // Try cache first
+      const cacheKey = `previews/${PREVIEW_CACHE_VERSION}/${gist.id}/${filename}/${file.r2Etag || 'inline'}.html`
+      try {
+        const cached = await r2.get(cacheKey)
+        if (cached) {
+          console.log('DOCX preview cache hit', { gistId: gist.id, filename })
+          return c.html(await cached.text())
+        }
+      } catch (cacheError) {
+        console.warn('Cache read failed, will regenerate', { cacheKey, error: cacheError })
+      }
+
+      // Convert DOCX to HTML
       const docxBuffer = new TextEncoder().encode(file.content).buffer
       const converter = new DocxConverter()
       const html = await converter.convertToHtml(docxBuffer)
+
+      // Store in cache asynchronously (non-blocking)
+      c.executionCtx.waitUntil(
+        r2.put(cacheKey, html, {
+          httpMetadata: { contentType: 'text/html; charset=utf-8' },
+          customMetadata: {
+            gistId: gist.id,
+            filename,
+            generatedAt: new Date().toISOString(),
+          },
+        }).catch(error => {
+          console.error('Failed to cache preview', { cacheKey, error })
+        })
+      )
 
       return c.html(html)
     } catch (error) {

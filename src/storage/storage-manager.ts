@@ -2,6 +2,7 @@ import type { R2Bucket } from '../env'
 
 const R2_MAX_RETRIES = 3
 const R2_RETRY_BASE_DELAY_MS = 100
+const TEXT_ENCODER = new TextEncoder()
 
 export type StorageType = 'inline' | 'r2'
 
@@ -22,7 +23,7 @@ export class StorageManager {
   shouldUseR2(content: string, filename: string): boolean {
     if (!this.r2) return false
 
-    const bytes = new TextEncoder().encode(content).length
+    const bytes = TEXT_ENCODER.encode(content).length
     if (bytes >= this.thresholdBytes) return true
 
     if (this.isBinaryFile(filename)) return true
@@ -64,7 +65,7 @@ export class StorageManager {
   }
 
   async store(gistId: string, filename: string, content: string): Promise<StoredFileMetadata> {
-    const size = new TextEncoder().encode(content).length
+    const size = TEXT_ENCODER.encode(content).length
 
     if (!this.shouldUseR2(content, filename)) {
       return {
