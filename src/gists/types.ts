@@ -131,3 +131,31 @@ export type UpdateGistRequest = {
   visibility?: unknown
   files?: unknown
 }
+
+// Tags and metadata types for academic writing
+export type GistTag = {
+  id: string
+  gistId: string
+  tag: string
+  createdAt: string
+}
+
+export type GistStatus = 'draft' | 'review' | 'completed'
+export type GistCategory = 'paper' | 'code' | 'document' | 'data' | 'experiment' | 'note' | 'other'
+
+export type GistMetadata = {
+  gistId: string
+  wordCount: number
+  lineCount: number
+  fileCount: number
+  totalSize: number
+  primaryLanguage: string | null
+  status: GistStatus
+  category: GistCategory | null
+  lastStatsUpdate: string | null
+}
+
+export type GistWithMetadata = GistRecord & {
+  tags?: string[]
+  metadata?: GistMetadata
+}
