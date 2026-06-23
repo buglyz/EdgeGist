@@ -19,9 +19,27 @@ export class DocxConverter {
 
   private sanitizeHtml(html: string): string {
     return html
+      // Remove script tags (all variants)
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-      .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
+      // Remove event handlers (with and without quotes)
+      .replace(/\s*on\w+\s*=\s*["'][^"']*["']/gi, '')
+      .replace(/\s*on\w+\s*=\s*[^\s>]*/gi, '')
+      // Remove javascript: protocol
       .replace(/javascript:/gi, '')
+      .replace(/vbscript:/gi, '')
+      .replace(/data:text\/html/gi, '')
+      // Remove dangerous tags
+      .replace(/<iframe\b[^>]*>/gi, '')
+      .replace(/<embed\b[^>]*>/gi, '')
+      .replace(/<object\b[^>]*>/gi, '')
+      .replace(/<applet\b[^>]*>/gi, '')
+      .replace(/<base\b[^>]*>/gi, '')
+      .replace(/<link\b[^>]*>/gi, '')
+      .replace(/<meta\b[^>]*>/gi, '')
+      // Remove SVG script tags
+      .replace(/<svg[^>]*>[\s\S]*?<script[\s\S]*?<\/script>[\s\S]*?<\/svg>/gi, '')
+      // Remove form elements
+      .replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '')
   }
 
   private wrapInContainer(html: string): string {

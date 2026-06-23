@@ -223,6 +223,7 @@ export class D1GistRepository implements GistRepository {
     const existing = await this.getGist(id, false)
     if (!existing) return false
 
+    // Collect all R2 keys before deleting database records
     const filesWithR2 = await this.db
       .prepare(
         `SELECT storage_type, r2_key
@@ -242,10 +243,38 @@ export class D1GistRepository implements GistRepository {
       .bind(id)
       .all<{ storage_type: string; r2_key: string | null }>()
 
+    const allR2Keys = [...(filesWithR2.results ?? []), ...(versionFilesWithR2.results ?? [])]
+      .map(f => f.r2_key)
+      .filter((key): key is string => key !== null)
+
+    // Delete database records first (triggers cascade)
     await this.db.prepare('DELETE FROM gists WHERE id = ?').bind(id).run()
 
-    for (const file of [...(filesWithR2.results ?? []), ...(versionFilesWithR2.results ?? [])]) {
-      await this.storageManager.delete(file.storage_type as 'r2', file.r2_key)
+    // Attempt to delete R2 objects (non-blocking)
+    // Failed deletions are queued for retry
+    for (const r2Key of allR2Keys) {
+      try {
+        await this.storageManager.delete('r2', r2Key)
+      } catch (error) {
+        console.error('R2 deletion failed, queuing for retry', {
+          gistId: id,
+          r2Key,
+          error: error instanceof Error ? error.message : String(error),
+        })
+
+        // Queue for retry (non-blocking)
+        try {
+          await this.db
+            .prepare(
+              `INSERT INTO r2_cleanup_queue (id, r2_key, gist_id, reason, created_at)
+               VALUES (?, ?, ?, ?, datetime('now'))`,
+            )
+            .bind(createId(20), r2Key, id, 'delete_gist_failed')
+            .run()
+        } catch (queueError) {
+          console.error('Failed to queue R2 cleanup', { r2Key, queueError })
+        }
+      }
     }
 
     return true

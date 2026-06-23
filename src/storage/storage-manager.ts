@@ -1,5 +1,8 @@
 import type { R2Bucket } from '../env'
 
+const R2_MAX_RETRIES = 3
+const R2_RETRY_BASE_DELAY_MS = 100
+
 export type StorageType = 'inline' | 'r2'
 
 export type StoredFileMetadata = {
@@ -106,30 +109,33 @@ export class StorageManager {
       throw new Error('R2 bucket not configured')
     }
 
-    const maxRetries = 3
     let lastError: Error | null = null
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+    for (let attempt = 0; attempt < R2_MAX_RETRIES; attempt++) {
       try {
         const object = await this.r2.get(r2Key)
         if (!object) {
-          if (attempt < maxRetries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)))
+          if (attempt < R2_MAX_RETRIES - 1) {
+            await new Promise((resolve) => setTimeout(resolve, R2_RETRY_BASE_DELAY_MS * Math.pow(2, attempt)))
             continue
           }
-          throw new Error(`R2 object not found: ${r2Key}`)
+          throw new Error(
+            `Failed to retrieve file from storage. ` +
+            `This may be due to a recent upload or a system issue. ` +
+            `Please try again in a few moments.`
+          )
         }
 
         return await object.text()
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < maxRetries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)))
+        if (attempt < R2_MAX_RETRIES - 1) {
+          await new Promise((resolve) => setTimeout(resolve, R2_RETRY_BASE_DELAY_MS * Math.pow(2, attempt)))
         }
       }
     }
 
-    throw lastError || new Error(`Failed to retrieve from R2 after ${maxRetries} attempts`)
+    throw lastError || new Error(`Failed to retrieve from R2 after ${R2_MAX_RETRIES} attempts`)
   }
 
   async delete(storageType: StorageType, r2Key: string | null): Promise<void> {
@@ -139,9 +145,9 @@ export class StorageManager {
   }
 
   private generateR2Key(gistId: string, filename: string): string {
-    const timestamp = Date.now()
-    const random = Math.random().toString(36).substring(2, 15)
-    return `gists/${gistId}/${timestamp}-${random}/${filename}`
+    const uuid = crypto.randomUUID()
+    const sanitizedFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_')
+    return `gists/${gistId}/${uuid}/${sanitizedFilename}`
   }
 
   private inferMimeType(filename: string): string {

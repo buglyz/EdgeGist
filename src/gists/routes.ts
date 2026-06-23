@@ -23,6 +23,8 @@ import type { ListGistsOptions } from './types'
 import { DocxConverter } from '../docx/docx-converter'
 import { StorageManager } from '../storage/storage-manager'
 
+const MAX_PREVIEW_SIZE_BYTES = 10 * 1024 * 1024 // 10MB
+
 const rawFileHeaders = {
   'content-type': 'text/plain; charset=utf-8',
   'x-content-type-options': 'nosniff',
@@ -222,8 +224,7 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
       const file = fullGist.files.find((candidate) => candidate.filename === filename)
       if (!file) throw notFound()
 
-      const maxPreviewSize = 10 * 1024 * 1024
-      if (file.size > maxPreviewSize) {
+      if (file.size > MAX_PREVIEW_SIZE_BYTES) {
         throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
       }
 
@@ -233,7 +234,13 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
 
       return c.html(html)
     } catch (error) {
-      console.error('DOCX preview error:', error)
+      console.error('DOCX preview error', {
+        gistId: gist.id,
+        filename,
+        fileSize: fullGist?.files.find(f => f.filename === filename)?.size,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      })
       const converter = new DocxConverter()
       return c.html(converter['generateErrorHtml'](error))
     }
@@ -262,8 +269,7 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
       const file = fullGist.files.find((candidate) => candidate.filename === filename)
       if (!file) throw notFound()
 
-      const maxPreviewSize = 10 * 1024 * 1024
-      if (file.size > maxPreviewSize) {
+      if (file.size > MAX_PREVIEW_SIZE_BYTES) {
         throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
       }
 
@@ -273,7 +279,13 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
 
       return c.html(html)
     } catch (error) {
-      console.error('DOCX preview error:', error)
+      console.error('DOCX preview error', {
+        gistId: gist.id,
+        filename,
+        fileSize: fullGist?.files.find(f => f.filename === filename)?.size,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      })
       const converter = new DocxConverter()
       return c.html(converter['generateErrorHtml'](error))
     }
