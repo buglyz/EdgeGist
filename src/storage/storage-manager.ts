@@ -106,12 +106,30 @@ export class StorageManager {
       throw new Error('R2 bucket not configured')
     }
 
-    const object = await this.r2.get(r2Key)
-    if (!object) {
-      throw new Error(`R2 object not found: ${r2Key}`)
+    const maxRetries = 3
+    let lastError: Error | null = null
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const object = await this.r2.get(r2Key)
+        if (!object) {
+          if (attempt < maxRetries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)))
+            continue
+          }
+          throw new Error(`R2 object not found: ${r2Key}`)
+        }
+
+        return await object.text()
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error))
+        if (attempt < maxRetries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)))
+        }
+      }
     }
 
-    return await object.text()
+    throw lastError || new Error(`Failed to retrieve from R2 after ${maxRetries} attempts`)
   }
 
   async delete(storageType: StorageType, r2Key: string | null): Promise<void> {

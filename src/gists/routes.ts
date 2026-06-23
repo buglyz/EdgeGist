@@ -222,6 +222,11 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
       const file = fullGist.files.find((candidate) => candidate.filename === filename)
       if (!file) throw notFound()
 
+      const maxPreviewSize = 10 * 1024 * 1024
+      if (file.size > maxPreviewSize) {
+        throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
+      }
+
       const docxBuffer = new TextEncoder().encode(file.content).buffer
       const converter = new DocxConverter()
       const html = await converter.convertToHtml(docxBuffer)
@@ -256,6 +261,11 @@ export function registerGistRoutes(app: Hono<AppEnv>, routeOptions: GistRoutesOp
 
       const file = fullGist.files.find((candidate) => candidate.filename === filename)
       if (!file) throw notFound()
+
+      const maxPreviewSize = 10 * 1024 * 1024
+      if (file.size > maxPreviewSize) {
+        throw new Error(`File too large for preview. Maximum size: 10MB (file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`)
+      }
 
       const docxBuffer = new TextEncoder().encode(file.content).buffer
       const converter = new DocxConverter()

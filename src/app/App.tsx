@@ -3625,7 +3625,7 @@ function GistDetailPage({
             {fileEditor ? (
               fileEditor
             ) : mode === 'content' ? (
-              <CodeViewer colorMode={colorMode} file={latestFile} fullscreen={contentFullscreen} />
+              <CodeViewer colorMode={colorMode} file={latestFile} fullscreen={contentFullscreen} gistId={detail?.id} />
             ) : (
               <DiffViewer
                 baseVersion={baseVersion}
@@ -5491,13 +5491,16 @@ function CodeViewer({
   colorMode,
   file,
   fullscreen = false,
+  gistId,
 }: {
   colorMode: ResolvedColorMode
   file: CodeFile | null
   fullscreen?: boolean
+  gistId?: string
 }) {
   const t = useT()
   const highlightedCode = useHighlightedCode(file, colorMode)
+  const [docxLoading, setDocxLoading] = useState(true)
 
   if (!file) {
     return (
@@ -5513,12 +5516,19 @@ function CodeViewer({
   }
 
   // DOCX preview support
-  if (file.filename.toLowerCase().endsWith('.docx')) {
-    const gistId = window.location.pathname.split('/')[2]
+  if (file.filename.toLowerCase().endsWith('.docx') && gistId) {
     const previewUrl = `/gists/${gistId}/files/${encodeURIComponent(file.filename)}/preview`
 
     return (
-      <div className={cn('docx-preview-wrapper', fullscreen && 'h-full')}>
+      <div className={cn('docx-preview-wrapper relative', fullscreen && 'h-full')}>
+        {docxLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading preview...
+            </div>
+          </div>
+        )}
         <iframe
           src={previewUrl}
           className="w-full border-0"
@@ -5528,6 +5538,7 @@ function CodeViewer({
           }}
           title={`Preview of ${file.filename}`}
           sandbox="allow-same-origin"
+          onLoad={() => setDocxLoading(false)}
         />
       </div>
     )
