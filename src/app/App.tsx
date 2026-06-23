@@ -5512,6 +5512,27 @@ function CodeViewer({
     )
   }
 
+  // DOCX preview support
+  if (file.filename.toLowerCase().endsWith('.docx')) {
+    const gistId = window.location.pathname.split('/')[2]
+    const previewUrl = `/gists/${gistId}/files/${encodeURIComponent(file.filename)}/preview`
+
+    return (
+      <div className={cn('docx-preview-wrapper', fullscreen && 'h-full')}>
+        <iframe
+          src={previewUrl}
+          className="w-full border-0"
+          style={{
+            minHeight: fullscreen ? '520px' : '600px',
+            height: fullscreen ? '100%' : 'calc(100vh - 200px)'
+          }}
+          title={`Preview of ${file.filename}`}
+          sandbox="allow-same-origin"
+        />
+      </div>
+    )
+  }
+
   if (!highlightedCode.ready) {
     return <CodeViewportSkeleton fullscreen={fullscreen} />
   }
